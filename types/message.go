@@ -1,0 +1,14 @@
+package types
+
+type MessageType string
+
+const (
+	MessageTypeData  MessageType = "data"
+	MessageTypeClose MessageType = "close"
+)
+
+type Message struct {
+	Type     MessageType `json:"type"`
+	StreamID string      `json:"stream_id"`
+	Data     []byte      `json:"data,omitempty"`
+}
