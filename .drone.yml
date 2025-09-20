@@ -1,0 +1,35 @@
+kind: pipeline
+type: docker
+name: default
+
+trigger:
+  branch:
+    - master
+
+steps:
+  # Unit Tests
+  - name: tests
+    image: golang
+    commands:
+      - make tests
+
+  # Fetch tags
+  - name: fetch tags
+    image: alpine/git
+    commands:
+      - git fetch --tags
+
+  # Publish docker image
+  - name: publish docker
+    image: plugins/docker
+    settings:
+      repo: gitea.va.reichard.io/evan/conduit
+      registry: gitea.va.reichard.io
+      tags:
+        - dev
+      custom_dns:
+        - 8.8.8.8
+      username:
+        from_secret: docker_username
+      password:
+        from_secret: docker_password

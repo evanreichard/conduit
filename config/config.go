@@ -11,6 +11,8 @@ import (
 	"github.com/spf13/pflag"
 )
 
+var version string = "develop"
+
 type ConfigDef struct {
 	Key         string
 	Env         string
@@ -100,6 +102,10 @@ func GetConfigDefs[T ServerConfig | ClientConfig]() []ConfigDef {
 	var defs []ConfigDef
 	processFields(reflect.TypeFor[T](), &defs)
 	return defs
+}
+
+func GetVersion() string {
+	return version
 }
 
 func getConfigValue(cmdFlags *pflag.FlagSet, def ConfigDef) string {

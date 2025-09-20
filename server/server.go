@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,16 @@ import (
 	"reichard.io/conduit/config"
 	"reichard.io/conduit/types"
 )
+
+type InfoResponse struct {
+	Tunnels []TunnelInfo `json:"tunnels"`
+	Version string       `json:"version"`
+}
+
+type TunnelInfo struct {
+	Name   string `json:"name"`
+	Target string `json:"target"`
+}
 
 type TunnelConnection struct {
 	*websocket.Conn
@@ -76,16 +87,31 @@ func (s *Server) Start() error {
 	}
 }
 
-func (s *Server) getStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
+	// Get Tunnels
+	var allTunnels []TunnelInfo
 	s.mu.RLock()
-	count := len(s.tunnels)
+	for t, c := range s.tunnels {
+		allTunnels = append(allTunnels, TunnelInfo{
+			Name:   t,
+			Target: c.RemoteAddr().String(),
+		})
+	}
 	s.mu.RUnlock()
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(200)
+	// Create Response
+	d, err := json.MarshalIndent(InfoResponse{
+		Tunnels: allTunnels,
+		Version: config.GetVersion(),
+	}, "", "  ")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
-	response := fmt.Sprintf(`{"tunnels": %d}`, count)
-	_, _ = w.Write([]byte(response))
+	// Send Response
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(d)
 }
 
 func (s *Server) proxyRawConnection(clientConn net.Conn, tunnelConn *TunnelConnection, dataReader io.Reader) {
@@ -212,8 +238,8 @@ func (s *Server) handleAsHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/_conduit/tunnel":
 		s.createTunnel(w, r)
-	case "/_conduit/status":
-		s.getStatus(w, r)
+	case "/_conduit/info":
+		s.getInfo(w, r)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
