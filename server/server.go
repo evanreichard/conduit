@@ -17,7 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 	"reichard.io/conduit/config"
-	"reichard.io/conduit/types"
+	"reichard.io/conduit/tunnel"
 )
 
 type InfoResponse struct {
@@ -30,19 +30,13 @@ type TunnelInfo struct {
 	Target string `json:"target"`
 }
 
-type TunnelConnection struct {
-	*websocket.Conn
-	name    string
-	streams map[string]chan []byte
-}
-
 type Server struct {
 	host string
 	cfg  *config.ServerConfig
 	mu   sync.RWMutex
 
 	upgrader websocket.Upgrader
-	tunnels  map[string]*TunnelConnection
+	tunnels  map[string]*tunnel.Tunnel
 }
 
 func NewServer(cfg *config.ServerConfig) (*Server, error) {
@@ -56,7 +50,7 @@ func NewServer(cfg *config.ServerConfig) (*Server, error) {
 	return &Server{
 		cfg:     cfg,
 		host:    serverURL.Host,
-		tunnels: make(map[string]*TunnelConnection),
+		tunnels: make(map[string]*tunnel.Tunnel),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -94,7 +88,7 @@ func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 	for t, c := range s.tunnels {
 		allTunnels = append(allTunnels, TunnelInfo{
 			Name:   t,
-			Target: c.RemoteAddr().String(),
+			Target: c.Source(),
 		})
 	}
 	s.mu.RUnlock()
@@ -114,63 +108,6 @@ func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(d)
 }
 
-func (s *Server) proxyRawConnection(clientConn net.Conn, tunnelConn *TunnelConnection, dataReader io.Reader) {
-	defer clientConn.Close()
-
-	// Create Identifiers
-	streamID := fmt.Sprintf("stream_%d", time.Now().UnixNano())
-	responseChan := make(chan []byte, 100)
-
-	// Register Stream
-	s.mu.Lock()
-	if tunnelConn.streams == nil {
-		tunnelConn.streams = make(map[string]chan []byte)
-	}
-	tunnelConn.streams[streamID] = responseChan
-	s.mu.Unlock()
-
-	// Clean Up
-	defer func() {
-		s.mu.Lock()
-		delete(tunnelConn.streams, streamID)
-		close(responseChan)
-		s.mu.Unlock()
-
-		// Send Close
-		closeMsg := types.Message{
-			Type:     types.MessageTypeClose,
-			StreamID: streamID,
-		}
-		_ = tunnelConn.WriteJSON(closeMsg)
-	}()
-
-	// Read & Send Chunks
-	go func() {
-		buffer := make([]byte, 4096)
-		for {
-			n, err := dataReader.Read(buffer)
-			if err != nil {
-				return
-			}
-
-			if err := tunnelConn.WriteJSON(types.Message{
-				Type:     types.MessageTypeData,
-				StreamID: streamID,
-				Data:     buffer[:n],
-			}); err != nil {
-				return
-			}
-		}
-	}()
-
-	// Return Response Data
-	for data := range responseChan {
-		if _, err := clientConn.Write(data); err != nil {
-			break
-		}
-	}
-}
-
 func (s *Server) handleRawConnection(conn net.Conn) {
 	defer conn.Close()
 
@@ -183,7 +120,7 @@ func (s *Server) handleRawConnection(conn net.Conn) {
 	bufReader := bufio.NewReader(teeReader)
 
 	// Create HTTP Request & Writer
-	w := &connResponseWriter{conn: conn}
+	w := &rawHTTPResponseWriter{conn: conn}
 	r, err := http.ReadRequest(bufReader)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -216,13 +153,17 @@ func (s *Server) handleRawConnection(conn net.Conn) {
 	s.mu.RLock()
 	tunnelConn, exists := s.tunnels[subdomain]
 	s.mu.RUnlock()
-	if exists {
-		log.Infof("relaying %s to tunnel", subdomain)
-
-		// Reconstruct Data & Proxy Connection
-		allReader := io.MultiReader(&capturedData, r.Body)
-		s.proxyRawConnection(conn, tunnelConn, allReader)
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprintf(w, "unknown tunnel: %s", subdomain)
+		return
 	}
+
+	// Initialize New Stream
+	log.Infof("relaying %s to tunnel", subdomain)
+	reconstructedConn := newReconstructedConn(conn, &capturedData)
+	streamID := fmt.Sprintf("stream_%d", time.Now().UnixNano())
+	tunnelConn.NewStream(streamID, reconstructedConn)
 }
 
 func (s *Server) handleAsHTTP(w http.ResponseWriter, r *http.Request) {
@@ -245,40 +186,6 @@ func (s *Server) handleAsHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleTunnelMessages(tunnel *TunnelConnection) {
-	for {
-		var msg types.Message
-		err := tunnel.ReadJSON(&msg)
-		if err != nil {
-			return
-		}
-
-		if msg.StreamID == "" {
-			log.Infof("tunnel %s missing streamID", tunnel.name)
-			continue
-		}
-
-		switch msg.Type {
-		case types.MessageTypeClose:
-			return
-		case types.MessageTypeData:
-			s.mu.RLock()
-			streamChan, exists := tunnel.streams[msg.StreamID]
-			if !exists {
-				log.Infof("stream %s does not exist", msg.StreamID)
-				s.mu.RUnlock()
-				continue
-			}
-
-			select {
-			case streamChan <- msg.Data:
-			case <-time.After(time.Second):
-				log.Warnf("stream %s channel full, dropping data", msg.StreamID)
-			}
-			s.mu.RUnlock()
-		}
-	}
-}
 func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 	// Get Tunnel Name
 	tunnelName := r.URL.Query().Get("tunnelName")
@@ -302,26 +209,20 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create & Cache TunnelConnection
-	tunnel := &TunnelConnection{
-		Conn:    wsConn,
-		name:    tunnelName,
-		streams: make(map[string]chan []byte),
-	}
+	// Create Tunnel
+	conduitTunnel := tunnel.NewTunnel(tunnelName, wsConn)
 	s.mu.Lock()
-	s.tunnels[tunnelName] = tunnel
+	s.tunnels[tunnelName] = conduitTunnel
 	s.mu.Unlock()
 	log.Infof("tunnel established: %s", tunnelName)
 
-	// Keep connection alive and handle cleanup
-	defer func() {
-		s.mu.Lock()
-		delete(s.tunnels, tunnelName)
-		s.mu.Unlock()
-		_ = wsConn.Close()
-		log.Infof("tunnel closed: %s", tunnelName)
-	}()
+	// Start Tunnel - This is blocking
+	conduitTunnel.Start()
 
-	// Handle tunnel messages
-	s.handleTunnelMessages(tunnel)
+	// Cleanup Tunnel
+	s.mu.Lock()
+	delete(s.tunnels, tunnelName)
+	s.mu.Unlock()
+	_ = wsConn.Close()
+	log.Infof("tunnel closed: %s", tunnelName)
 }
