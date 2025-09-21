@@ -151,7 +151,7 @@ func (s *Server) handleRawConnection(conn net.Conn) {
 
 	// Handle Tunnels
 	s.mu.RLock()
-	tunnelConn, exists := s.tunnels[subdomain]
+	conduitTunnel, exists := s.tunnels[subdomain]
 	s.mu.RUnlock()
 	if !exists {
 		w.WriteHeader(http.StatusNotFound)
@@ -159,11 +159,17 @@ func (s *Server) handleRawConnection(conn net.Conn) {
 		return
 	}
 
-	// Initialize New Stream
-	log.Infof("relaying %s to tunnel", subdomain)
+	// Add & Start Stream
 	reconstructedConn := newReconstructedConn(conn, &capturedData)
 	streamID := fmt.Sprintf("stream_%d", time.Now().UnixNano())
-	tunnelConn.NewStream(streamID, reconstructedConn)
+	if err := conduitTunnel.AddStream(streamID, reconstructedConn); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprintf(w, "failed to add stream: %v", err)
+		return
+	}
+
+	log.Infof("relaying %s to tunnel", subdomain)
+	_ = conduitTunnel.StartStream(streamID)
 }
 
 func (s *Server) handleAsHTTP(w http.ResponseWriter, r *http.Request) {
@@ -210,7 +216,7 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create Tunnel
-	conduitTunnel := tunnel.NewTunnel(tunnelName, wsConn)
+	conduitTunnel := tunnel.NewServerTunnel(tunnelName, wsConn)
 	s.mu.Lock()
 	s.tunnels[tunnelName] = conduitTunnel
 	s.mu.Unlock()

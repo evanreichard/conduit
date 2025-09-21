@@ -25,9 +25,7 @@ var tunnelCmd = &cobra.Command{
 
 		// Start Tunnel
 		log.Infof("creating TCP tunnel: %s -> %s", cfg.TunnelName, cfg.TunnelTarget)
-		if err := tunnel.Start(); err != nil {
-			log.Fatal("failed to start tunnel:", err)
-		}
+		tunnel.Start()
 	},
 }
 

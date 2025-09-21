@@ -1,7 +1,9 @@
 package tunnel
 
 import (
+	"fmt"
 	"io"
+	"net"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -9,7 +11,7 @@ import (
 	"reichard.io/conduit/types"
 )
 
-func NewTunnel(name string, wsConn *websocket.Conn) *Tunnel {
+func NewServerTunnel(name string, wsConn *websocket.Conn) *Tunnel {
 	return &Tunnel{
 		name:    name,
 		wsConn:  wsConn,
@@ -17,16 +19,26 @@ func NewTunnel(name string, wsConn *websocket.Conn) *Tunnel {
 	}
 }
 
+func NewClientTunnel(name, target string, wsConn *websocket.Conn) *Tunnel {
+	return &Tunnel{
+		name:    name,
+		wsConn:  wsConn,
+		streams: make(map[string]io.ReadWriteCloser),
+		connBuilder: func() (io.ReadWriteCloser, error) {
+			return net.Dial("tcp", target)
+		},
+	}
+}
+
 type Tunnel struct {
-	name    string
-	wsConn  *websocket.Conn
-	streams map[string]io.ReadWriteCloser
+	name        string
+	wsConn      *websocket.Conn
+	streams     map[string]io.ReadWriteCloser
+	connBuilder func() (io.ReadWriteCloser, error)
 
 	wsMu, streamsMu sync.Mutex
 }
 
-// Start starts the tunnel and is the primary loop that handles all websocket messages.
-// Messages are relayed to the local stream.
 func (t *Tunnel) Start() {
 	for {
 		var msg types.Message
@@ -35,31 +47,71 @@ func (t *Tunnel) Start() {
 			return
 		}
 
+		// Validate Stream
 		if msg.StreamID == "" {
 			log.Warnf("tunnel %s missing streamID", t.name)
 			continue
 		}
 
+		// Ensure Stream
+		if err := t.initStreamConnection(msg.StreamID); err != nil {
+			log.WithError(err).Errorf("failed to initialize stream %s connection", t.name)
+			continue
+		}
+
+		// Handle Messages
 		switch msg.Type {
 		case types.MessageTypeClose:
-			t.CloseStream(msg.StreamID)
+			_ = t.CloseStream(msg.StreamID)
 		case types.MessageTypeData:
-			t.WriteStream(msg.StreamID, msg.Data)
+			_ = t.WriteStream(msg.StreamID, msg.Data)
 		}
 	}
 }
 
-func (t *Tunnel) NewStream(streamID string, localConn io.ReadWriteCloser) {
-	t.streamsMu.Lock()
-	t.streams[streamID] = localConn
-	t.streamsMu.Unlock()
+func (t *Tunnel) initStreamConnection(streamID string) error {
+	if _, found := t.getStream(streamID); found {
+		return nil
+	}
 
+	conn, err := t.connBuilder()
+	if err != nil {
+		return err
+	}
+
+	if err := t.AddStream(streamID, conn); err != nil {
+		return err
+	}
+
+	go t.StartStream(streamID)
+	return nil
+}
+
+func (t *Tunnel) AddStream(streamID string, conn io.ReadWriteCloser) error {
+	t.streamsMu.Lock()
+	defer t.streamsMu.Unlock()
+
+	if _, found := t.streams[streamID]; found {
+		return fmt.Errorf("stream %s already exists", streamID)
+	}
+	t.streams[streamID] = conn
+	return nil
+}
+
+func (t *Tunnel) StartStream(streamID string) error {
+	// Get Stream
+	conn, found := t.getStream(streamID)
+	if !found {
+		return fmt.Errorf("stream %s does not exist", streamID)
+	}
+
+	// Start Stream
 	defer t.CloseStream(streamID)
 	buffer := make([]byte, 4096)
 	for {
-		n, err := localConn.Read(buffer)
+		n, err := conn.Read(buffer)
 		if err != nil {
-			return
+			return err
 		}
 
 		if err := t.sendWS(&types.Message{
@@ -67,22 +119,23 @@ func (t *Tunnel) NewStream(streamID string, localConn io.ReadWriteCloser) {
 			Data:     buffer[:n],
 			StreamID: streamID,
 		}); err != nil {
-			return
+			return err
 		}
 	}
 }
 
-func (t *Tunnel) WriteStream(streamID string, data []byte) {
-	t.streamsMu.Lock()
-	defer t.streamsMu.Unlock()
-	if localConn, ok := t.streams[streamID]; ok {
-		_, _ = localConn.Write(data)
-	} else {
-		log.Infof("stream %s does not exist", streamID)
+func (t *Tunnel) WriteStream(streamID string, data []byte) error {
+	// Get Stream
+	conn, found := t.getStream(streamID)
+	if !found {
+		return fmt.Errorf("stream %s does not exist", streamID)
 	}
+
+	_, err := conn.Write(data)
+	return err
 }
 
-func (t *Tunnel) CloseStream(streamID string) {
+func (t *Tunnel) CloseStream(streamID string) error {
 	_ = t.sendWS(&types.Message{
 		Type:     types.MessageTypeClose,
 		StreamID: streamID,
@@ -90,10 +143,11 @@ func (t *Tunnel) CloseStream(streamID string) {
 
 	t.streamsMu.Lock()
 	defer t.streamsMu.Unlock()
-	if localConn, ok := t.streams[streamID]; ok {
+	if conn, ok := t.streams[streamID]; ok {
 		delete(t.streams, streamID)
-		_ = localConn.Close()
+		return conn.Close()
 	}
+	return nil
 }
 
 func (t *Tunnel) Source() string {
@@ -104,4 +158,14 @@ func (t *Tunnel) sendWS(msg *types.Message) error {
 	t.wsMu.Lock()
 	defer t.wsMu.Unlock()
 	return t.wsConn.WriteJSON(msg)
+}
+
+func (t *Tunnel) getStream(streamID string) (io.ReadWriteCloser, bool) {
+	t.streamsMu.Lock()
+	defer t.streamsMu.Unlock()
+
+	if conn, ok := t.streams[streamID]; ok {
+		return conn, true
+	}
+	return nil, false
 }
