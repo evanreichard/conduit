@@ -111,7 +111,7 @@ func GetVersion() string {
 func getConfigValue(cmdFlags *pflag.FlagSet, def ConfigDef) string {
 	// 1. Get Flags First
 	if cmdFlags != nil {
-		if val, err := cmdFlags.GetString(def.Key); err == nil && val != "" {
+		if val, err := cmdFlags.GetString(def.Key); err == nil && val != "" && val != def.Default {
 			return val
 		}
 	}
