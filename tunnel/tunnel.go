@@ -70,6 +70,10 @@ func (t *Tunnel) Start() {
 }
 
 func (t *Tunnel) initStreamConnection(streamID string) error {
+	if t.connBuilder == nil {
+		return nil
+	}
+
 	if _, found := t.getStream(streamID); found {
 		return nil
 	}
@@ -105,8 +109,17 @@ func (t *Tunnel) StartStream(streamID string) error {
 		return fmt.Errorf("stream %s does not exist", streamID)
 	}
 
+	// Close Stream
+	defer func() {
+		_ = t.sendWS(&types.Message{
+			Type:     types.MessageTypeClose,
+			StreamID: streamID,
+		})
+
+		t.CloseStream(streamID)
+	}()
+
 	// Start Stream
-	defer t.CloseStream(streamID)
 	buffer := make([]byte, 4096)
 	for {
 		n, err := conn.Read(buffer)
@@ -136,11 +149,6 @@ func (t *Tunnel) WriteStream(streamID string, data []byte) error {
 }
 
 func (t *Tunnel) CloseStream(streamID string) error {
-	_ = t.sendWS(&types.Message{
-		Type:     types.MessageTypeClose,
-		StreamID: streamID,
-	})
-
 	t.streamsMu.Lock()
 	defer t.streamsMu.Unlock()
 	if conn, ok := t.streams[streamID]; ok {
