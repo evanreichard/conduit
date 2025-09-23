@@ -73,7 +73,7 @@ func (s *Server) Start() error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("error accepting connection: %v", err)
+			log.WithError(err).Error("error accepting connection")
 			continue
 		}
 
@@ -99,12 +99,14 @@ func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 		Version: config.GetVersion(),
 	}, "", "  ")
 	if err != nil {
+		log.WithError(err).Error("failed to marshal info")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	// Send Response
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(d)
 }
 
