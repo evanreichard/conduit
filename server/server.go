@@ -11,12 +11,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 	"reichard.io/conduit/config"
+	"reichard.io/conduit/pkg/maps"
 	"reichard.io/conduit/tunnel"
 )
 
@@ -33,10 +33,9 @@ type TunnelInfo struct {
 type Server struct {
 	host string
 	cfg  *config.ServerConfig
-	mu   sync.RWMutex
 
 	upgrader websocket.Upgrader
-	tunnels  map[string]*tunnel.Tunnel
+	tunnels  *maps.Map[string, *tunnel.Tunnel]
 }
 
 func NewServer(cfg *config.ServerConfig) (*Server, error) {
@@ -50,7 +49,7 @@ func NewServer(cfg *config.ServerConfig) (*Server, error) {
 	return &Server{
 		cfg:     cfg,
 		host:    serverURL.Host,
-		tunnels: make(map[string]*tunnel.Tunnel),
+		tunnels: maps.New[string, *tunnel.Tunnel](),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -84,14 +83,12 @@ func (s *Server) Start() error {
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
 	// Get Tunnels
 	var allTunnels []TunnelInfo
-	s.mu.RLock()
-	for t, c := range s.tunnels {
+	for t, c := range s.tunnels.Entries() {
 		allTunnels = append(allTunnels, TunnelInfo{
 			Name:   t,
 			Target: c.Source(),
 		})
 	}
-	s.mu.RUnlock()
 
 	// Create Response
 	d, err := json.MarshalIndent(InfoResponse{
@@ -152,9 +149,7 @@ func (s *Server) handleRawConnection(conn net.Conn) {
 	}
 
 	// Handle Tunnels
-	s.mu.RLock()
-	conduitTunnel, exists := s.tunnels[subdomain]
-	s.mu.RUnlock()
+	conduitTunnel, exists := s.tunnels.Get(subdomain)
 	if !exists {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = fmt.Fprintf(w, "unknown tunnel: %s", subdomain)
@@ -204,7 +199,7 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate Unique
-	if _, exists := s.tunnels[tunnelName]; exists {
+	if _, exists := s.tunnels.Get(tunnelName); exists {
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte("Tunnel already registered"))
 		return
@@ -219,18 +214,14 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 
 	// Create Tunnel
 	conduitTunnel := tunnel.NewServerTunnel(tunnelName, wsConn)
-	s.mu.Lock()
-	s.tunnels[tunnelName] = conduitTunnel
-	s.mu.Unlock()
+	s.tunnels.Set(tunnelName, conduitTunnel)
 	log.Infof("tunnel established: %s", tunnelName)
 
 	// Start Tunnel - This is blocking
 	conduitTunnel.Start()
 
 	// Cleanup Tunnel
-	s.mu.Lock()
-	delete(s.tunnels, tunnelName)
-	s.mu.Unlock()
+	s.tunnels.Delete(tunnelName)
 	_ = wsConn.Close()
 	log.Infof("tunnel closed: %s", tunnelName)
 }
