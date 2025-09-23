@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"sync"
 
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 	"reichard.io/conduit/types"
 )
+
+type ConnBuilder func() (conn io.ReadWriteCloser, err error)
 
 func NewServerTunnel(name string, wsConn *websocket.Conn) *Tunnel {
 	return &Tunnel{
@@ -19,22 +22,40 @@ func NewServerTunnel(name string, wsConn *websocket.Conn) *Tunnel {
 	}
 }
 
-func NewClientTunnel(name, target string, wsConn *websocket.Conn) *Tunnel {
-	return &Tunnel{
-		name:    name,
-		wsConn:  wsConn,
-		streams: make(map[string]io.ReadWriteCloser),
-		connBuilder: func() (io.ReadWriteCloser, error) {
-			return net.Dial("tcp", target)
-		},
+func NewClientTunnel(name, target string, wsConn *websocket.Conn) (*Tunnel, error) {
+	targetURL, err := url.Parse(target)
+	if err != nil {
+		return nil, err
 	}
+
+	var connBuilder ConnBuilder
+	switch targetURL.Scheme {
+	case "http", "https":
+		log.Infof("creating HTTP tunnel: %s -> %s", name, target)
+		connBuilder, err = HTTPConnectionBuilder(targetURL)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		log.Infof("creating TCP tunnel: %s -> %s", name, target)
+		connBuilder = func() (conn io.ReadWriteCloser, err error) {
+			return net.Dial("tcp", target)
+		}
+	}
+
+	return &Tunnel{
+		name:        name,
+		wsConn:      wsConn,
+		streams:     make(map[string]io.ReadWriteCloser),
+		connBuilder: connBuilder,
+	}, nil
 }
 
 type Tunnel struct {
 	name        string
 	wsConn      *websocket.Conn
 	streams     map[string]io.ReadWriteCloser
-	connBuilder func() (io.ReadWriteCloser, error)
+	connBuilder ConnBuilder
 
 	wsMu, streamsMu sync.Mutex
 }
