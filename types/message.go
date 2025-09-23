@@ -8,7 +8,8 @@ const (
 )
 
 type Message struct {
-	Type     MessageType `json:"type"`
-	StreamID string      `json:"stream_id"`
-	Data     []byte      `json:"data,omitempty"`
+	Type       MessageType `json:"type"`
+	StreamID   string      `json:"stream_id"`
+	SourceAddr string      `json:"source_addr"`
+	Data       []byte      `json:"data,omitempty"`
 }

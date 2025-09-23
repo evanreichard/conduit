@@ -41,5 +41,5 @@ func NewTunnel(cfg *config.ClientConfig) (*tunnel.Tunnel, error) {
 		return nil, fmt.Errorf("failed to connect: %v", err)
 	}
 
-	return tunnel.NewClientTunnel(cfg.TunnelName, cfg.TunnelTarget, serverConn)
+	return tunnel.NewClientTunnel(cfg.TunnelName, cfg.TunnelTarget, serverURL, serverConn)
 }

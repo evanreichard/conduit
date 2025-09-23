@@ -23,22 +23,28 @@ func NewServerTunnel(name string, wsConn *websocket.Conn) *Tunnel {
 	}
 }
 
-func NewClientTunnel(name, target string, wsConn *websocket.Conn) (*Tunnel, error) {
+func NewClientTunnel(name, target string, serverURL *url.URL, wsConn *websocket.Conn) (*Tunnel, error) {
+	// Get Target URL
 	targetURL, err := url.Parse(target)
 	if err != nil {
 		return nil, err
 	}
 
+	// Derive Conduit URL
+	conduitURL := *serverURL
+	conduitURL.Host = name + "." + conduitURL.Host
+
+	// Get Connection Builder
 	var connBuilder ConnBuilder
 	switch targetURL.Scheme {
 	case "http", "https":
-		log.Infof("creating HTTP tunnel: %s -> %s", name, target)
+		log.Infof("creating HTTP tunnel: %s -> %s", conduitURL.String(), target)
 		connBuilder, err = HTTPConnectionBuilder(targetURL)
 		if err != nil {
 			return nil, err
 		}
 	default:
-		log.Infof("creating TCP tunnel: %s -> %s", name, target)
+		log.Infof("creating TCP tunnel: %s -> %s", conduitURL.String(), target)
 		connBuilder = func() (conn io.ReadWriteCloser, err error) {
 			return net.Dial("tcp", target)
 		}
@@ -109,7 +115,7 @@ func (t *Tunnel) initStreamConnection(streamID string) error {
 		return err
 	}
 
-	go t.StartStream(streamID)
+	go t.StartStream(streamID, "")
 	return nil
 }
 
@@ -121,7 +127,7 @@ func (t *Tunnel) AddStream(streamID string, conn io.ReadWriteCloser) error {
 	return nil
 }
 
-func (t *Tunnel) StartStream(streamID string) error {
+func (t *Tunnel) StartStream(streamID string, sourceAddr string) error {
 	// Get Stream
 	conn, found := t.streams.Get(streamID)
 	if !found {
@@ -131,8 +137,9 @@ func (t *Tunnel) StartStream(streamID string) error {
 	// Close Stream
 	defer func() {
 		_ = t.sendWS(&types.Message{
-			Type:     types.MessageTypeClose,
-			StreamID: streamID,
+			Type:       types.MessageTypeClose,
+			StreamID:   streamID,
+			SourceAddr: sourceAddr,
 		})
 
 		t.CloseStream(streamID)
@@ -147,9 +154,10 @@ func (t *Tunnel) StartStream(streamID string) error {
 		}
 
 		if err := t.sendWS(&types.Message{
-			Type:     types.MessageTypeData,
-			Data:     buffer[:n],
-			StreamID: streamID,
+			Type:       types.MessageTypeData,
+			StreamID:   streamID,
+			Data:       buffer[:n],
+			SourceAddr: sourceAddr,
 		}); err != nil {
 			return err
 		}

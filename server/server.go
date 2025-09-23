@@ -135,24 +135,31 @@ func (s *Server) handleRawConnection(conn net.Conn) {
 	}
 
 	// Extract Subdomain
-	subdomain := strings.TrimSuffix(strings.Replace(r.Host, s.host, "", 1), ".")
-	if strings.Count(subdomain, ".") != 0 {
+	tunnelName := strings.TrimSuffix(strings.Replace(r.Host, s.host, "", 1), ".")
+	if strings.Count(tunnelName, ".") != 0 {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = fmt.Fprintf(w, "cannot tunnel nested subdomains: %s", r.Host)
 		return
 	}
 
+	// Get True Host
+	remoteHost := conn.RemoteAddr().String()
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		remoteHost = xff
+	}
+	r.RemoteAddr = remoteHost
+
 	// Handle Control Endpoints
-	if subdomain == "" {
+	if tunnelName == "" {
 		s.handleAsHTTP(w, r)
 		return
 	}
 
 	// Handle Tunnels
-	conduitTunnel, exists := s.tunnels.Get(subdomain)
+	conduitTunnel, exists := s.tunnels.Get(tunnelName)
 	if !exists {
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = fmt.Fprintf(w, "unknown tunnel: %s", subdomain)
+		_, _ = fmt.Fprintf(w, "unknown tunnel: %s", tunnelName)
 		return
 	}
 
@@ -165,8 +172,8 @@ func (s *Server) handleRawConnection(conn net.Conn) {
 		return
 	}
 
-	log.Infof("relaying %s to tunnel", subdomain)
-	_ = conduitTunnel.StartStream(streamID)
+	log.Infof("tunnel %q connection from %s", tunnelName, r.RemoteAddr)
+	_ = conduitTunnel.StartStream(streamID, r.RemoteAddr)
 }
 
 func (s *Server) handleAsHTTP(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +222,7 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 	// Create Tunnel
 	conduitTunnel := tunnel.NewServerTunnel(tunnelName, wsConn)
 	s.tunnels.Set(tunnelName, conduitTunnel)
-	log.Infof("tunnel established: %s", tunnelName)
+	log.Infof("tunnel %q created from %s", tunnelName, r.RemoteAddr)
 
 	// Start Tunnel - This is blocking
 	conduitTunnel.Start()
@@ -223,5 +230,5 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 	// Cleanup Tunnel
 	s.tunnels.Delete(tunnelName)
 	_ = wsConn.Close()
-	log.Infof("tunnel closed: %s", tunnelName)
+	log.Infof("tunnel %q closed from %s", tunnelName, r.RemoteAddr)
 }
