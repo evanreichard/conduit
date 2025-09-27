@@ -23,6 +23,8 @@ type ConfigDef struct {
 type BaseConfig struct {
 	ServerAddress string `json:"server" description:"Conduit server address" default:"http://localhost:8080"`
 	APIKey        string `json:"api_key" description:"API Key for the conduit API"`
+	LogLevel      string `json:"log_level" default:"info" description:"Log level"`
+	LogFormat     string `json:"log_format" default:"text" description:"Log format - text or json"`
 }
 
 func (c *BaseConfig) Validate() error {
@@ -34,6 +36,9 @@ func (c *BaseConfig) Validate() error {
 	}
 	if _, err := url.Parse(c.ServerAddress); err != nil {
 		return fmt.Errorf("server is invalid: %w", err)
+	}
+	if c.LogFormat != "text" && c.LogFormat != "json" {
+		return fmt.Errorf("log format must be 'text' or 'json'")
 	}
 	return nil
 }
@@ -68,12 +73,12 @@ func GetServerConfig(cmdFlags *pflag.FlagSet) (*ServerConfig, error) {
 	}
 
 	cfg := &ServerConfig{
-		BaseConfig: BaseConfig{
-			ServerAddress: cfgValues["server"],
-			APIKey:        cfgValues["api_key"],
-		},
+		BaseConfig:  getBaseConfig(cfgValues),
 		BindAddress: cfgValues["bind"],
 	}
+
+	// Initialize Logger
+	initLogger(cfg.BaseConfig)
 
 	return cfg, cfg.Validate()
 }
@@ -87,13 +92,13 @@ func GetClientConfig(cmdFlags *pflag.FlagSet) (*ClientConfig, error) {
 	}
 
 	cfg := &ClientConfig{
-		BaseConfig: BaseConfig{
-			ServerAddress: cfgValues["server"],
-			APIKey:        cfgValues["api_key"],
-		},
+		BaseConfig:   getBaseConfig(cfgValues),
 		TunnelName:   cfgValues["name"],
 		TunnelTarget: cfgValues["target"],
 	}
+
+	// Initialize Logger
+	initLogger(cfg.BaseConfig)
 
 	return cfg, cfg.Validate()
 }
@@ -106,6 +111,15 @@ func GetConfigDefs[T ServerConfig | ClientConfig]() []ConfigDef {
 
 func GetVersion() string {
 	return version
+}
+
+func getBaseConfig(cfgValues map[string]string) BaseConfig {
+	return BaseConfig{
+		ServerAddress: cfgValues["server"],
+		APIKey:        cfgValues["api_key"],
+		LogLevel:      cfgValues["log_level"],
+		LogFormat:     cfgValues["log_format"],
+	}
 }
 
 func getConfigValue(cmdFlags *pflag.FlagSet, def ConfigDef) string {

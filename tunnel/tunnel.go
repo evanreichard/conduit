@@ -1,76 +1,88 @@
 package tunnel
 
 import (
+	"context"
 	"fmt"
-	"io"
-	"net"
 	"net/url"
 	"sync"
 
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
+	"reichard.io/conduit/config"
 	"reichard.io/conduit/pkg/maps"
 	"reichard.io/conduit/types"
 )
 
-type ConnBuilder func() (conn io.ReadWriteCloser, err error)
-
+// NewServerTunnel creates a new tunnel with name and websocket connection. The tunnel is
+// generally instantiated after an upgrade request from the server.
 func NewServerTunnel(name string, wsConn *websocket.Conn) *Tunnel {
 	return &Tunnel{
 		name:    name,
-		streams: maps.New[string, io.ReadWriteCloser](),
+		streams: maps.New[string, Stream](),
 		wsConn:  wsConn,
 	}
 }
 
-func NewClientTunnel(name, target string, serverURL *url.URL, wsConn *websocket.Conn) (*Tunnel, error) {
-	// Get Target URL
-	targetURL, err := url.Parse(target)
+// NewClientTunnel creates a new tunnel with the provided configuration and forwarder. A
+// forwarder is effectively the protocol being forwarded. For example HTTP (Proxy), and TCP.
+func NewClientTunnel(cfg *config.ClientConfig, forwarder Forwarder) (*Tunnel, error) {
+	// Parse Server URL
+	serverURL, err := url.Parse(cfg.ServerAddress)
 	if err != nil {
 		return nil, err
 	}
 
-	// Derive Conduit URL
-	conduitURL := *serverURL
-	conduitURL.Host = name + "." + conduitURL.Host
-
-	// Get Connection Builder
-	var connBuilder ConnBuilder
-	switch targetURL.Scheme {
-	case "http", "https":
-		log.Infof("creating HTTP tunnel: %s -> %s", conduitURL.String(), target)
-		connBuilder, err = HTTPConnectionBuilder(targetURL)
-		if err != nil {
-			return nil, err
-		}
+	// Parse Scheme
+	var wsScheme string
+	switch serverURL.Scheme {
+	case "https":
+		wsScheme = "wss"
+	case "http":
+		wsScheme = "ws"
 	default:
-		log.Infof("creating TCP tunnel: %s -> %s", conduitURL.String(), target)
-		connBuilder = func() (conn io.ReadWriteCloser, err error) {
-			return net.Dial("tcp", target)
-		}
+		return nil, fmt.Errorf("unsupported scheme: %s", serverURL.Scheme)
+	}
+
+	// Create Tunnel Name
+	if cfg.TunnelName == "" {
+		cfg.TunnelName = generateTunnelName()
+		log.Infof("tunnel name not provided; generated: %s", cfg.TunnelName)
+	}
+
+	// Connect Server WS
+	wsURL := fmt.Sprintf("%s://%s/_conduit/tunnel?tunnelName=%s&apiKey=%s", wsScheme, serverURL.Host, cfg.TunnelName, cfg.APIKey)
+	serverConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect: %v", err)
 	}
 
 	return &Tunnel{
-		name:        name,
-		wsConn:      wsConn,
-		streams:     maps.New[string, io.ReadWriteCloser](),
-		connBuilder: connBuilder,
+		name:      cfg.TunnelName,
+		wsConn:    serverConn,
+		streams:   maps.New[string, Stream](),
+		forwarder: forwarder,
 	}, nil
 }
 
 type Tunnel struct {
-	name        string
-	wsConn      *websocket.Conn
-	streams     *maps.Map[string, io.ReadWriteCloser]
-	connBuilder ConnBuilder
+	ctx       context.Context
+	name      string
+	wsConn    *websocket.Conn
+	streams   *maps.Map[string, Stream]
+	forwarder Forwarder
 
 	mu sync.Mutex
 }
 
-func (t *Tunnel) Start() {
+func (t *Tunnel) Start(ctx context.Context) {
+	log.Infof("initiated tunnel %q with %s", t.name, t.wsConn.RemoteAddr().String())
+	defer log.Infof("closed tunnel %q with %s", t.name, t.wsConn.RemoteAddr().String())
+
+	t.ctx = ctx
+
+	// Start Message Receiver
 	for {
-		var msg types.Message
-		err := t.wsConn.ReadJSON(&msg)
+		msg, err := t.readWSWithContext(ctx)
 		if err != nil {
 			return
 		}
@@ -81,74 +93,71 @@ func (t *Tunnel) Start() {
 			continue
 		}
 
-		// Ensure Stream
-		if err := t.initStreamConnection(msg.StreamID); err != nil {
-			log.WithError(err).Errorf("failed to initialize stream %s connection", t.name)
+		// Get Stream
+		stream, err := t.getStream(msg.StreamID)
+		if err != nil {
+			if msg.Type != types.MessageTypeClose {
+				log.WithError(err).Errorf("failed to get stream %s", msg.StreamID)
+			}
 			continue
 		}
 
 		// Handle Messages
 		switch msg.Type {
 		case types.MessageTypeClose:
-			_ = t.CloseStream(msg.StreamID)
+			_ = t.closeStream(stream, msg.StreamID)
 		case types.MessageTypeData:
-			_ = t.WriteStream(msg.StreamID, msg.Data)
+			_, err = stream.Write(msg.Data)
+		}
+
+		// Log Error
+		if err != nil {
+			log.WithError(err).Errorf("failed to handle message %s", msg.StreamID)
 		}
 	}
 }
 
-func (t *Tunnel) initStreamConnection(streamID string) error {
-	if t.connBuilder == nil {
-		return nil
+func (t *Tunnel) readWSWithContext(ctx context.Context) (*types.Message, error) {
+	type result struct {
+		msg *types.Message
+		err error
 	}
 
-	if _, found := t.streams.Get(streamID); found {
-		return nil
-	}
+	resultChan := make(chan result, 1)
+	go func() {
+		var msg types.Message
+		err := t.wsConn.ReadJSON(&msg)
+		resultChan <- result{&msg, err}
+	}()
 
-	conn, err := t.connBuilder()
-	if err != nil {
-		return err
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultChan:
+		return result.msg, result.err
 	}
-
-	if err := t.AddStream(streamID, conn); err != nil {
-		return err
-	}
-
-	go t.StartStream(streamID, "")
-	return nil
 }
 
-func (t *Tunnel) AddStream(streamID string, conn io.ReadWriteCloser) error {
+func (t *Tunnel) AddStream(stream Stream, streamID string) error {
 	if t.streams.HasKey(streamID) {
 		return fmt.Errorf("stream %s already exists", streamID)
 	}
-	t.streams.Set(streamID, conn)
+	log.Infof("tunnel %q initiated stream with %s", t.name, stream.Source())
+	t.streams.Set(streamID, stream)
 	return nil
 }
 
-func (t *Tunnel) StartStream(streamID string, sourceAddr string) error {
-	// Get Stream
-	conn, found := t.streams.Get(streamID)
-	if !found {
-		return fmt.Errorf("stream %s does not exist", streamID)
-	}
+func (t *Tunnel) Source() string {
+	return t.wsConn.RemoteAddr().String()
+}
 
+func (t *Tunnel) StartStream(stream Stream, streamID string) error {
 	// Close Stream
-	defer func() {
-		_ = t.sendWS(&types.Message{
-			Type:       types.MessageTypeClose,
-			StreamID:   streamID,
-			SourceAddr: sourceAddr,
-		})
-
-		t.CloseStream(streamID)
-	}()
+	defer t.closeStream(stream, streamID)
 
 	// Start Stream
-	buffer := make([]byte, 4096)
 	for {
-		n, err := conn.Read(buffer)
+		data, err := t.readStreamWithContext(t.ctx, stream)
 		if err != nil {
 			return err
 		}
@@ -156,35 +165,62 @@ func (t *Tunnel) StartStream(streamID string, sourceAddr string) error {
 		if err := t.sendWS(&types.Message{
 			Type:       types.MessageTypeData,
 			StreamID:   streamID,
-			Data:       buffer[:n],
-			SourceAddr: sourceAddr,
+			Data:       data,
+			SourceAddr: stream.Source(),
 		}); err != nil {
 			return err
 		}
 	}
 }
 
-func (t *Tunnel) WriteStream(streamID string, data []byte) error {
-	// Get Stream
-	conn, found := t.streams.Get(streamID)
-	if !found {
-		return fmt.Errorf("stream %s does not exist", streamID)
-	}
-
-	_, err := conn.Write(data)
-	return err
+func (t *Tunnel) closeStream(stream Stream, streamID string) error {
+	log.Infof("tunnel %q closed stream with %s", t.name, stream.Source())
+	t.streams.Delete(streamID)
+	return stream.Close()
 }
 
-func (t *Tunnel) CloseStream(streamID string) error {
-	if conn, ok := t.streams.Get(streamID); ok {
-		t.streams.Delete(streamID)
-		return conn.Close()
+func (t *Tunnel) getStream(streamID string) (Stream, error) {
+	// Check Existing Stream
+	if stream, found := t.streams.Get(streamID); found {
+		return stream, nil
 	}
-	return nil
+
+	// Check Forwarder
+	if t.forwarder == nil {
+		return nil, fmt.Errorf("stream %s does not exist", streamID)
+	}
+
+	// Initialize Forwarder & Add Stream
+	stream, err := t.forwarder.Initialize()
+	if err != nil {
+		return nil, err
+	}
+	if err := t.AddStream(stream, streamID); err != nil {
+		return nil, err
+	}
+	go t.StartStream(stream, streamID)
+	return stream, nil
 }
 
-func (t *Tunnel) Source() string {
-	return t.wsConn.RemoteAddr().String()
+func (t *Tunnel) readStreamWithContext(ctx context.Context, stream Stream) ([]byte, error) {
+	type result struct {
+		data []byte
+		err  error
+	}
+
+	resultChan := make(chan result, 1)
+	go func() {
+		buffer := make([]byte, 4096)
+		n, err := stream.Read(buffer)
+		resultChan <- result{buffer[:n], err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultChan:
+		return result.data, result.err
+	}
 }
 
 func (t *Tunnel) sendWS(msg *types.Message) error {

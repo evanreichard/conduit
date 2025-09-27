@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+
 	"reichard.io/conduit/config"
 	"reichard.io/conduit/server"
 
@@ -19,8 +21,11 @@ var serveCmd = &cobra.Command{
 			log.Fatal("failed to get server config:", err)
 		}
 
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
 		// Create Server
-		srv, err := server.NewServer(cfg)
+		srv, err := server.NewServer(ctx, cfg)
 		if err != nil {
 			log.Fatal("failed to create server:", err)
 		}

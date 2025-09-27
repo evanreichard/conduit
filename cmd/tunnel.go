@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
+
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	"reichard.io/conduit/client"
 	"reichard.io/conduit/config"
+	"reichard.io/conduit/store"
+	"reichard.io/conduit/tunnel"
 )
 
 var tunnelCmd = &cobra.Command{
@@ -17,12 +20,22 @@ var tunnelCmd = &cobra.Command{
 			log.Fatal("failed to get client config:", err)
 		}
 
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Create Forwarder
+		tunnelForwarder, err := tunnel.NewForwarder(cfg.TunnelTarget, store.NewTunnelStore(100))
+		if err != nil {
+			log.Fatal("failed to create tunnel forwarder:", err)
+		}
+		go tunnelForwarder.Start(ctx)
+
 		// Create Tunnel
-		tunnel, err := client.NewTunnel(cfg)
+		tunnel, err := tunnel.NewClientTunnel(cfg, tunnelForwarder)
 		if err != nil {
 			log.Fatal("failed to create tunnel:", err)
 		}
-		tunnel.Start()
+		tunnel.Start(ctx)
 	},
 }
 

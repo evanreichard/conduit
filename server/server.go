@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ type TunnelInfo struct {
 }
 
 type Server struct {
+	ctx  context.Context
 	host string
 	cfg  *config.ServerConfig
 
@@ -38,7 +40,7 @@ type Server struct {
 	tunnels  *maps.Map[string, *tunnel.Tunnel]
 }
 
-func NewServer(cfg *config.ServerConfig) (*Server, error) {
+func NewServer(ctx context.Context, cfg *config.ServerConfig) (*Server, error) {
 	serverURL, err := url.Parse(cfg.ServerAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse server address: %v", err)
@@ -47,6 +49,7 @@ func NewServer(cfg *config.ServerConfig) (*Server, error) {
 	}
 
 	return &Server{
+		ctx:     ctx,
 		cfg:     cfg,
 		host:    serverURL.Host,
 		tunnels: maps.New[string, *tunnel.Tunnel](),
@@ -163,17 +166,21 @@ func (s *Server) handleRawConnection(conn net.Conn) {
 		return
 	}
 
-	// Add & Start Stream
+	// Create Stream
 	reconstructedConn := newReconstructedConn(conn, &capturedData)
 	streamID := fmt.Sprintf("stream_%d", time.Now().UnixNano())
-	if err := conduitTunnel.AddStream(streamID, reconstructedConn); err != nil {
+	tunnelStream := tunnel.NewStream(reconstructedConn, r.RemoteAddr)
+
+	// Add Stream
+	if err := conduitTunnel.AddStream(tunnelStream, streamID); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = fmt.Fprintf(w, "failed to add stream: %v", err)
+		log.WithError(err).Error("failed to add stream")
 		return
 	}
 
-	log.Infof("tunnel %q connection from %s", tunnelName, r.RemoteAddr)
-	_ = conduitTunnel.StartStream(streamID, r.RemoteAddr)
+	// Start Stream
+	conduitTunnel.StartStream(tunnelStream, streamID)
 }
 
 func (s *Server) handleAsHTTP(w http.ResponseWriter, r *http.Request) {
@@ -222,13 +229,11 @@ func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
 	// Create Tunnel
 	conduitTunnel := tunnel.NewServerTunnel(tunnelName, wsConn)
 	s.tunnels.Set(tunnelName, conduitTunnel)
-	log.Infof("tunnel %q created from %s", tunnelName, r.RemoteAddr)
 
 	// Start Tunnel - This is blocking
-	conduitTunnel.Start()
+	conduitTunnel.Start(s.ctx)
 
 	// Cleanup Tunnel
 	s.tunnels.Delete(tunnelName)
 	_ = wsConn.Close()
-	log.Infof("tunnel %q closed from %s", tunnelName, r.RemoteAddr)
 }
