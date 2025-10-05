@@ -12,3 +12,7 @@ A lightweight tunneling service that enables secure connection forwarding throug
 - Bypass firewall restrictions for remote access
 
 Perfect for developers who need quick, temporary public access to local services without complex networking setup.
+
+### Example
+
+![Example](https://gitea.va.reichard.io/evan/conduit/raw/branch/main/assets/example.gif)
