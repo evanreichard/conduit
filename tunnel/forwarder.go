@@ -16,7 +16,7 @@ const (
 
 type Forwarder interface {
 	Type() ForwarderType
-	Initialize() (Stream, error)
+	Initialize(sourceAddress string) (Stream, error)
 	Start(context.Context) error
 }
 

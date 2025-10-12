@@ -94,7 +94,7 @@ func (t *Tunnel) Start(ctx context.Context) {
 		}
 
 		// Get Stream
-		stream, err := t.getStream(msg.StreamID)
+		stream, err := t.getStream(msg.StreamID, msg.SourceAddr)
 		if err != nil {
 			if msg.Type != types.MessageTypeClose {
 				log.WithError(err).Errorf("failed to get stream %s", msg.StreamID)
@@ -179,7 +179,7 @@ func (t *Tunnel) closeStream(stream Stream, streamID string) error {
 	return stream.Close()
 }
 
-func (t *Tunnel) getStream(streamID string) (Stream, error) {
+func (t *Tunnel) getStream(streamID, sourceAddress string) (Stream, error) {
 	// Check Existing Stream
 	if stream, found := t.streams.Get(streamID); found {
 		return stream, nil
@@ -191,7 +191,7 @@ func (t *Tunnel) getStream(streamID string) (Stream, error) {
 	}
 
 	// Initialize Forwarder & Add Stream
-	stream, err := t.forwarder.Initialize()
+	stream, err := t.forwarder.Initialize(sourceAddress)
 	if err != nil {
 		return nil, err
 	}

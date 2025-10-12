@@ -169,7 +169,7 @@ func (s *Server) handleRawConnection(conn net.Conn) {
 	// Create Stream
 	reconstructedConn := newReconstructedConn(conn, &capturedData)
 	streamID := fmt.Sprintf("stream_%d", time.Now().UnixNano())
-	tunnelStream := tunnel.NewStream(reconstructedConn, r.RemoteAddr)
+	tunnelStream := tunnel.NewStream(reconstructedConn, r.RemoteAddr, conduitTunnel.Source())
 
 	// Add Stream
 	if err := conduitTunnel.AddStream(tunnelStream, streamID); err != nil {

@@ -33,12 +33,31 @@ func (c *httpConnBuilder) Type() ForwarderType {
 func (c *httpConnBuilder) Start(ctx context.Context) error {
 	// Create Reverse Proxy Server
 	server := &http.Server{
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			if wsConn, ok := c.(*wsConn); ok {
+				return context.WithValue(ctx, "sourceAddr", wsConn.sourceAddress)
+			}
+			return ctx
+		},
 		Handler: &httputil.ReverseProxy{
 			Director: func(req *http.Request) {
+				// Rewrite Request URL
 				req.Host = c.targetURL.Host
 				req.URL.Host = c.targetURL.Host
 				req.URL.Scheme = c.targetURL.Scheme
-				c.tunnelStore.RecordRequest(req)
+
+				// Rewrite Referer
+				if referer := req.Header.Get("Referer"); referer != "" {
+					if refURL, err := url.Parse(referer); err == nil {
+						refURL.Host = c.targetURL.Host
+						refURL.Scheme = c.targetURL.Scheme
+						req.Header.Set("Referer", refURL.String())
+					}
+				}
+
+				// Extract Source Address & Record Request
+				sourceAddress, _ := req.Context().Value("sourceAddr").(string)
+				c.tunnelStore.RecordRequest(req, sourceAddress)
 			},
 			ModifyResponse: c.tunnelStore.RecordResponse,
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -61,16 +80,16 @@ func (c *httpConnBuilder) Start(ctx context.Context) error {
 	return nil
 }
 
-func (c *httpConnBuilder) Initialize() (Stream, error) {
+func (c *httpConnBuilder) Initialize(sourceAddress string) (Stream, error) {
 	clientConn, serverConn := net.Pipe()
 
-	if err := c.multiConnListener.addConn(serverConn); err != nil {
+	if err := c.multiConnListener.addConn(&wsConn{serverConn, sourceAddress}); err != nil {
 		_ = clientConn.Close()
 		_ = serverConn.Close()
 		return nil, err
 	}
 
-	return &streamImpl{clientConn, c.targetURL.String()}, nil
+	return &streamImpl{clientConn, sourceAddress, c.targetURL.String()}, nil
 }
 
 type multiConnListener struct {
@@ -129,4 +148,9 @@ func (l *multiConnListener) addConn(conn net.Conn) error {
 		conn.Close()
 		return fmt.Errorf("connection queue full")
 	}
+}
+
+type wsConn struct {
+	net.Conn
+	sourceAddress string
 }

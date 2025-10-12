@@ -1,6 +1,6 @@
 module reichard.io/conduit
 
-go 1.24.4
+go 1.25.1
 
 require (
 	github.com/google/uuid v1.6.0 // indirect
@@ -10,4 +10,5 @@ require (
 	github.com/spf13/cobra v1.10.1 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	golang.org/x/sys v0.0.0-20220715151400-c0bba94af5f8 // indirect
+	maragu.dev/gomponents v1.2.0 // indirect
 )

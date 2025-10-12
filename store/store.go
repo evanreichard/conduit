@@ -6,7 +6,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -21,27 +20,14 @@ const (
 
 var ErrRecordNotFound = errors.New("record not found")
 
+type OnEntryHandler func(record *TunnelRecord)
+
 type TunnelStore interface {
 	Get(before time.Time, count int) (results []*TunnelRecord, more bool)
+	Subscribe() <-chan *TunnelRecord
 	RecordTCP()
-	RecordRequest(req *http.Request)
+	RecordRequest(req *http.Request, sourceAddress string)
 	RecordResponse(resp *http.Response) error
-}
-
-type TunnelRecord struct {
-	ID     uuid.UUID
-	Time   time.Time
-	URL    *url.URL
-	Method string
-	Status int
-
-	RequestHeaders  http.Header
-	RequestBodyType string
-	RequestBody     []byte
-
-	ResponseHeaders  http.Header
-	ResponseBodyType string
-	ResponseBody     []byte
 }
 
 func NewTunnelStore(queueSize int) TunnelStore {
@@ -57,7 +43,23 @@ func NewTunnelStore(queueSize int) TunnelStore {
 type tunnelStoreImpl struct {
 	orderedRecords []*TunnelRecord
 	queueSize      int
+	subs           []chan *TunnelRecord
 	mu             sync.Mutex
+}
+
+func (s *tunnelStoreImpl) Subscribe() <-chan *TunnelRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ch := make(chan *TunnelRecord, 100)
+
+	// Flush Existing & Subscribe
+	for _, r := range s.orderedRecords {
+		ch <- r
+	}
+	s.subs = append(s.subs, ch)
+
+	return ch
 }
 
 func (s *tunnelStoreImpl) Get(before time.Time, count int) ([]*TunnelRecord, bool) {
@@ -83,7 +85,7 @@ func (s *tunnelStoreImpl) Get(before time.Time, count int) ([]*TunnelRecord, boo
 	return results, more
 }
 
-func (s *tunnelStoreImpl) RecordRequest(req *http.Request) {
+func (s *tunnelStoreImpl) RecordRequest(req *http.Request, sourceAddress string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -93,6 +95,7 @@ func (s *tunnelStoreImpl) RecordRequest(req *http.Request) {
 		Time:            time.Now(),
 		URL:             &url,
 		Method:          req.Method,
+		SourceAddr:      sourceAddress,
 		RequestHeaders:  req.Header,
 		RequestBodyType: req.Header.Get("Content-Type"),
 	}
@@ -116,12 +119,15 @@ func (s *tunnelStoreImpl) RecordResponse(resp *http.Response) error {
 		return ErrRecordNotFound
 	}
 
+	rec.Status = resp.StatusCode
 	rec.ResponseHeaders = resp.Header
 	rec.ResponseBodyType = resp.Header.Get("Content-Type")
 
 	if bodyData, err := getResponseBody(resp); err == nil {
 		rec.ResponseBody = bodyData
 	}
+
+	s.broadcast(rec)
 
 	return nil
 }
@@ -131,6 +137,23 @@ func (s *tunnelStoreImpl) RecordTCP() {
 	defer s.mu.Unlock()
 
 	// TODO
+}
+
+func (s *tunnelStoreImpl) broadcast(record *TunnelRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Send to Subscribers
+	active := s.subs[:0]
+	for _, ch := range s.subs {
+		select {
+		case ch <- record:
+			active = append(active, ch)
+		default:
+			close(ch)
+		}
+	}
+	s.subs = active
 }
 
 func getRequestBody(req *http.Request) ([]byte, error) {
