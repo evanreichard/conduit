@@ -11,7 +11,7 @@ Conduit is a self-hosted tunneling service (Go, single binary). A **server** (`c
 make build_local
 
 # Run tests
-make tests              # includes coverage
+make tests              # includes race detection + coverage
 
 # Lint
 golangci-lint run
@@ -59,7 +59,7 @@ pkg/maps/map.go         — Generic sync.RWMutex-guarded map
 
 ## Testing
 
-E2E tests live in `e2e_test.go` at the project root. They spin up real servers, tunnels, and targets on random ports.
+E2E tests live in `e2e_test.go` at the project root. They spin up real servers, tunnels, and targets on random ports. `make tests` runs with `-race` and coverage enabled.
 
 ```bash
 # Run all tests

@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
@@ -35,6 +35,7 @@ type Server struct {
 
 	upgrader websocket.Upgrader
 	tunnels  *maps.Map[string, *tunnel.Tunnel]
+	streamID atomic.Uint64
 }
 
 func NewServer(ctx context.Context, cfg *config.ServerConfig) (*Server, error) {
@@ -145,7 +146,7 @@ func (s *Server) handleTunnelRequest(w http.ResponseWriter, r *http.Request, tun
 	reconstructedConn := newReconstructedConn(conn, &reqBuf, bufrw)
 
 	// Create Stream
-	streamID := fmt.Sprintf("stream_%d", time.Now().UnixNano())
+	streamID := fmt.Sprintf("stream_%d", s.streamID.Add(1))
 	tunnelStream := tunnel.NewStream(reconstructedConn, r.RemoteAddr, conduitTunnel.Source())
 
 	// Add Stream
@@ -156,7 +157,7 @@ func (s *Server) handleTunnelRequest(w http.ResponseWriter, r *http.Request, tun
 	}
 
 	// Start Stream
-	conduitTunnel.StartStream(tunnelStream, streamID)
+	conduitTunnel.StartStream(s.ctx, tunnelStream, streamID)
 }
 
 func (s *Server) getInfo(w http.ResponseWriter, _ *http.Request) {
