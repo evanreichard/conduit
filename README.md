@@ -23,7 +23,7 @@ Deploy Conduit on a public server (e.g., `https://conduit.example.com`), then cr
 │ tunnel       │    (control + streams)      │ serve            │
 │ (client)     │                             │ (public server)  │
 ├──────────────┤                             ├──────────────────┤
-│ HTTP Fwd  or │                             │ Raw TCP listener │
+│ HTTP Fwd  or │                             │ http.Server      │
 │ TCP Fwd      │                             │ Subdomain router │
 ├──────────────┤                             │ WS upgrade       │
 │ Tunnel       │                             └──────────────────┘
@@ -31,7 +31,7 @@ Deploy Conduit on a public server (e.g., `https://conduit.example.com`), then cr
 └──────────────┘
 ```
 
-The server accepts raw TCP connections, reads the HTTP `Host` header to determine routing. Requests to the base domain hit the control API; requests to subdomains are forwarded over WebSocket to the matching tunnel client. The client then forwards traffic to the local target via either a reverse-proxy (HTTP) or direct TCP dial.
+The server uses `net/http.Server` to accept connections and inspects the HTTP `Host` header for routing. Requests to the base domain hit the control API; requests to subdomains are hijacked and forwarded over WebSocket to the matching tunnel client. The client then forwards traffic to the local target via either a reverse-proxy (HTTP) or direct TCP dial.
 
 ## Quick Start
 
@@ -127,7 +127,7 @@ All options can be set via CLI flags or environment variables (`CONDUIT_` prefix
 ```
 ├── cmd/             # Cobra CLI commands (root, serve, tunnel)
 ├── config/          # Configuration parsing & logging setup
-├── server/          # TCP listener, subdomain routing, WebSocket upgrade
+├── server/          # HTTP server, subdomain routing, hijack + WebSocket upgrade
 ├── tunnel/          # Tunnel, Stream, and Forwarder abstractions
 ├── store/           # In-memory request/response recording for the monitor
 ├── web/             # Local tunnel monitor HTTP server & SSE streaming

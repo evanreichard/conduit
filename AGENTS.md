@@ -22,17 +22,17 @@ Go 1.25+ is required (`go.mod`). Nix devshell provides Go, gopls, golangci-lint.
 ## Architecture at a Glance
 
 ```
-server/server.go   — Raw TCP listener, reads Host header, routes to tunnel or control API
-tunnel/tunnel.go   — Core Tunnel struct, WebSocket message loop, stream management
-tunnel/forwarder.go — Forwarder interface; factory selects HTTP or TCP forwarder
+server/server.go        — net/http.Server, ServeHTTP routes by Host subdomain to tunnel or control API
+tunnel/tunnel.go        — Core Tunnel struct, WebSocket message loop, stream management
+tunnel/forwarder.go     — Forwarder interface; HTTP/HTTPS → HTTP forwarder, everything else → TCP
 tunnel/http_forwarder.go — httputil.ReverseProxy served over net.Pipe via multiConnListener
 tunnel/tcp_forwarder.go  — Direct net.Dial TCP forwarding
-tunnel/stream.go   — Stream interface (io.ReadWriteCloser + Source/Target)
-store/store.go     — In-memory request/response recorder with pub/sub (SSE)
-web/web.go         — Local tunnel monitor (port 8181), SSE endpoint
-config/config.go   — Reflection-based config from struct tags → flags + env vars
-pkg/maps/map.go    — Generic sync.RWMutex-guarded map
-types/message.go   — WebSocket message envelope (data | close)
+tunnel/stream.go        — Stream interface (io.ReadWriteCloser + Source/Target)
+server/reconstructed_conn.go — Replays re-serialized headers + buffered body + raw conn after hijack
+store/store.go          — In-memory request/response recorder with pub/sub (SSE)
+web/web.go              — Local tunnel monitor (port 8181), SSE endpoint
+config/config.go        — Reflection-based config from struct tags → flags + env vars
+pkg/maps/map.go         — Generic sync.RWMutex-guarded map
 ```
 
 ## Code Conventions
@@ -46,9 +46,9 @@ types/message.go   — WebSocket message envelope (data | close)
 
 ## Key Patterns
 
-1. **Raw TCP → HTTP upgrade**: The server reads from a raw TCP connection to inspect the Host header before deciding whether to handle as a control API request or tunnel the connection via WebSocket.
-2. **Reconstructed connection**: After reading the HTTP request from the raw conn, `reconstructedConn` replays the consumed bytes so the full TCP stream can be forwarded.
-3. **Forwarder abstraction**: `Forwarder` interface decouples tunnel transport from protocol handling. HTTP forwarder uses `net.Pipe` + `multiConnListener` to feed connections into a standard `http.Server`.
+1. **ServeHTTP + Hijack for tunnel routing**: The server uses `net/http.Server` with a `ServeHTTP` handler. It inspects the `Host` header to determine routing. Control API requests are handled normally via `http.ResponseWriter`. Tunnel requests hijack the TCP connection, re-serialize the HTTP request, and forward it through the tunnel via `reconstructedConn`.
+2. **Reconstructed connection**: After hijack, `reconstructedConn` combines re-serialized request headers, buffered body data from the hijacked `bufio.ReadWriter`, and the raw connection into a single `io.Reader` so the tunnel client receives the complete request.
+3. **Forwarder abstraction**: `Forwarder` interface decouples tunnel transport from protocol handling. `NewForwarder` only uses `url.Parse` for `http://`/`https://` schemes; everything else (including parse failures like bare `host:port`) is treated as raw TCP. HTTP forwarder uses `net.Pipe` + `multiConnListener` to feed connections into a standard `http.Server`.
 4. **Context-threaded records**: Request records are attached to context in `RecordRequest` and retrieved in `RecordResponse` via the `ModifyResponse` hook.
 
 ## Adding a New Forwarder
@@ -56,6 +56,20 @@ types/message.go   — WebSocket message envelope (data | close)
 1. Implement `tunnel.Forwarder` interface (`Type()`, `Initialize()`, `Start()`)
 2. Add a case in `tunnel.NewForwarder()` factory
 3. Add corresponding `ForwarderType` const
+
+## Testing
+
+E2E tests live in `e2e_test.go` at the project root. They spin up real servers, tunnels, and targets on random ports.
+
+```bash
+# Run all tests
+make tests
+
+# Run specific test
+ go test -v -run TestHTTPTunnelRoundTrip -count=1 ./...
+```
+
+16 tests covering: HTTP round-trip (GET/POST), TCP echo, large bodies (1MB resp / 512KB req), response quality (headers, content-type, content-length), error paths (404, 401, duplicate name), multi-tunnel routing, concurrency, and graceful shutdown.
 
 ## File Locations
 
@@ -69,3 +83,4 @@ types/message.go   — WebSocket message envelope (data | close)
 | Web UI | `web/`, `web/pages/` |
 | Shared types | `types/` |
 | Utilities | `pkg/maps/` |
+| E2E tests | `e2e_test.go` |
