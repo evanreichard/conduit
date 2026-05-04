@@ -505,3 +505,360 @@ func TestServerGracefulShutdown(t *testing.T) {
 		t.Error("expected server port to be closed after shutdown")
 	}
 }
+
+// ---------- HTTP Response Quality Tests ----------
+
+func TestHTTPResponseHasProperHeaders(t *testing.T) {
+	apiKey := "test-key-headers"
+
+	// Start Target HTTP Server
+	targetAddr, stopTarget := startHTTPTarget(t)
+	defer stopTarget()
+
+	// Start Conduit Server
+	serverAddr, stopServer := startConduitServer(t, apiKey)
+	defer stopServer()
+
+	// Connect Tunnel
+	stopTunnel := connectTunnel(t, serverAddr, fmt.Sprintf("http://%s", targetAddr), "hdr-test", apiKey)
+	defer stopTunnel()
+
+	// Send Request Through Tunnel
+	resp := sendHTTPViaTunnel(t, serverAddr, "hdr-test", "GET", "/", "")
+	defer resp.Body.Close()
+
+	// Verify Proper HTTP Semantics
+	if resp.Proto != "HTTP/1.1" {
+		t.Errorf("expected HTTP/1.1, got %s", resp.Proto)
+	}
+	if resp.Header.Get("X-Test-Header") != "present" {
+		t.Errorf("expected X-Test-Header: present, got %q", resp.Header.Get("X-Test-Header"))
+	}
+	if resp.ContentLength <= 0 && resp.TransferEncoding == nil {
+		t.Errorf("expected Content-Length or Transfer-Encoding, got neither")
+	}
+}
+
+func TestHTTPControlEndpointResponseQuality(t *testing.T) {
+	apiKey := "test-key-ctrl-quality"
+
+	// Start Conduit Server
+	serverAddr, stopServer := startConduitServer(t, apiKey)
+	defer stopServer()
+
+	// 404 on Unknown Tunnel — Verify stdlib response format
+	resp := sendHTTPViaTunnel(t, serverAddr, "nope", "GET", "/", "")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+
+	// Content-Type Should Be Set by http.Error
+	ct := resp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "text/plain") {
+		t.Errorf("expected text/plain Content-Type, got %q", ct)
+	}
+
+	// Content-Length Should Be Present
+	if resp.ContentLength <= 0 {
+		t.Errorf("expected positive Content-Length, got %d", resp.ContentLength)
+	}
+
+	// Info Endpoint — JSON response quality
+	url := fmt.Sprintf("http://%s/_conduit/info?apiKey=%s", serverAddr, apiKey)
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Host = serverAddr
+
+	resp2, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("info request failed: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.Header.Get("Content-Type") != "application/json" {
+		t.Errorf("expected application/json, got %q", resp2.Header.Get("Content-Type"))
+	}
+}
+
+// ---------- Large Body Tests ----------
+
+func TestHTTPLargeResponseBody(t *testing.T) {
+	apiKey := "test-key-large-resp"
+
+	// Start Target That Returns a Large Body
+	largeBody := strings.Repeat("A", 1024*1024) // 1 MB
+	port := getFreePort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/large", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(largeBody))
+	})
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go srv.ListenAndServe()
+	defer srv.Close()
+	waitForPort(t, addr, 3*time.Second)
+
+	// Start Conduit Server
+	serverAddr, stopServer := startConduitServer(t, apiKey)
+	defer stopServer()
+
+	// Connect Tunnel
+	stopTunnel := connectTunnel(t, serverAddr, fmt.Sprintf("http://%s", addr), "large-resp", apiKey)
+	defer stopTunnel()
+
+	// Request Large Response
+	resp := sendHTTPViaTunnel(t, serverAddr, "large-resp", "GET", "/large", "")
+	body := readBody(t, resp)
+
+	if len(body) != len(largeBody) {
+		t.Errorf("expected %d bytes, got %d", len(largeBody), len(body))
+	}
+}
+
+func TestHTTPLargeRequestBody(t *testing.T) {
+	apiKey := "test-key-large-req"
+
+	// Start Target That Echoes Body Size
+	port := getFreePort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "size:%d", len(data))
+	})
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go srv.ListenAndServe()
+	defer srv.Close()
+	waitForPort(t, addr, 3*time.Second)
+
+	// Start Conduit Server
+	serverAddr, stopServer := startConduitServer(t, apiKey)
+	defer stopServer()
+
+	// Connect Tunnel
+	stopTunnel := connectTunnel(t, serverAddr, fmt.Sprintf("http://%s", addr), "large-req", apiKey)
+	defer stopTunnel()
+
+	// Send Large Request Body (512 KB)
+	largePayload := strings.Repeat("B", 512*1024)
+	resp := sendHTTPViaTunnel(t, serverAddr, "large-req", "POST", "/upload", largePayload)
+	body := readBody(t, resp)
+
+	expected := fmt.Sprintf("size:%d", len(largePayload))
+	if body != expected {
+		t.Errorf("expected %q, got %q", expected, body)
+	}
+}
+
+// ---------- TCP Tunnel Tests ----------
+
+func TestTCPTunnelEcho(t *testing.T) {
+	apiKey := "test-key-tcp"
+
+	// Start TCP Echo Server
+	tcpAddr, stopTCP := startTCPEchoTarget(t)
+	defer stopTCP()
+
+	// Start Conduit Server
+	serverAddr, stopServer := startConduitServer(t, apiKey)
+	defer stopServer()
+
+	// Connect TCP Tunnel (bare host:port — the realistic way users would specify it)
+	stopTunnel := connectTunnel(t, serverAddr, tcpAddr, "tcp-test", apiKey)
+	defer stopTunnel()
+
+	// Send Raw HTTP Request Through Tunnel to TCP Echo
+	conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+	defer conn.Close()
+
+	// Write a Raw HTTP Request (the TCP echo will bounce it back)
+	reqLine := fmt.Sprintf("GET / HTTP/1.1\r\nHost: tcp-test.%s\r\n\r\n", serverAddr)
+	_, err = conn.Write([]byte(reqLine))
+	if err != nil {
+		t.Fatalf("failed to write: %v", err)
+	}
+
+	// Read Echoed Data
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read echo: %v", err)
+	}
+
+	response := string(buf[:n])
+	if !strings.Contains(response, "GET / HTTP/1.1") {
+		t.Errorf("expected echoed request, got: %q", response)
+	}
+}
+
+func TestTCPTunnelLargePayload(t *testing.T) {
+	apiKey := "test-key-tcp-large"
+
+	// Start TCP Echo Server
+	tcpAddr, stopTCP := startTCPEchoTarget(t)
+	defer stopTCP()
+
+	// Start Conduit Server
+	serverAddr, stopServer := startConduitServer(t, apiKey)
+	defer stopServer()
+
+	// Connect TCP Tunnel (bare host:port)
+	stopTunnel := connectTunnel(t, serverAddr, tcpAddr, "tcp-large", apiKey)
+	defer stopTunnel()
+
+	// Connect and Send Large Payload
+	conn, err := net.DialTimeout("tcp", serverAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+	defer conn.Close()
+
+	// Route via Host Header Then Send 64 KB Payload
+	header := fmt.Sprintf("POST /data HTTP/1.1\r\nHost: tcp-large.%s\r\nContent-Length: 65536\r\n\r\n", serverAddr)
+	payload := header + strings.Repeat("X", 64*1024)
+
+	_, err = conn.Write([]byte(payload))
+	if err != nil {
+		t.Fatalf("failed to write: %v", err)
+	}
+
+	// Read All Echoed Data
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var received []byte
+	buf := make([]byte, 8192)
+	for len(received) < len(payload) {
+		n, err := conn.Read(buf)
+		if err != nil {
+			break
+		}
+		received = append(received, buf[:n]...)
+	}
+
+	if len(received) != len(payload) {
+		t.Errorf("expected %d bytes echoed, got %d", len(payload), len(received))
+	}
+}
+
+// ---------- Concurrency Tests ----------
+
+func TestConcurrentHTTPRequests(t *testing.T) {
+	apiKey := "test-key-concurrent"
+
+	// Start Target HTTP Server
+	targetAddr, stopTarget := startHTTPTarget(t)
+	defer stopTarget()
+
+	// Start Conduit Server
+	serverAddr, stopServer := startConduitServer(t, apiKey)
+	defer stopServer()
+
+	// Connect Tunnel
+	stopTunnel := connectTunnel(t, serverAddr, fmt.Sprintf("http://%s", targetAddr), "conc-test", apiKey)
+	defer stopTunnel()
+
+	// Fire 20 Concurrent Requests
+	const numRequests = 20
+	var wg sync.WaitGroup
+	errors := make(chan string, numRequests)
+
+	for i := range numRequests {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			path := fmt.Sprintf("/item/%d", idx)
+			resp := sendHTTPViaTunnel(t, serverAddr, "conc-test", "GET", path, "")
+			body := readBody(t, resp)
+
+			expected := fmt.Sprintf("echo: GET %s", path)
+			if !strings.Contains(body, expected) {
+				errors <- fmt.Sprintf("request %d: expected %q, got %q", idx, expected, body)
+			}
+			if resp.StatusCode != http.StatusOK {
+				errors <- fmt.Sprintf("request %d: expected 200, got %d", idx, resp.StatusCode)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	for errMsg := range errors {
+		t.Error(errMsg)
+	}
+}
+
+func TestConcurrentMultiTunnelRequests(t *testing.T) {
+	apiKey := "test-key-conc-multi"
+
+	// Start Two Target Servers
+	target1Addr, stopTarget1 := startHTTPTarget(t)
+	defer stopTarget1()
+
+	port2 := getFreePort(t)
+	addr2 := fmt.Sprintf("127.0.0.1:%d", port2)
+	mux2 := http.NewServeMux()
+	mux2.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "server-two: %s", r.URL.Path)
+	})
+	srv2 := &http.Server{Addr: addr2, Handler: mux2}
+	go srv2.ListenAndServe()
+	defer srv2.Close()
+	waitForPort(t, addr2, 3*time.Second)
+
+	// Start Conduit Server
+	serverAddr, stopServer := startConduitServer(t, apiKey)
+	defer stopServer()
+
+	// Connect Two Tunnels
+	stopTunnel1 := connectTunnel(t, serverAddr, fmt.Sprintf("http://%s", target1Addr), "cm-one", apiKey)
+	defer stopTunnel1()
+
+	stopTunnel2 := connectTunnel(t, serverAddr, fmt.Sprintf("http://%s", addr2), "cm-two", apiKey)
+	defer stopTunnel2()
+
+	// Fire Concurrent Requests to Both Tunnels
+	const perTunnel = 10
+	var wg sync.WaitGroup
+	errors := make(chan string, perTunnel*2)
+
+	for i := range perTunnel {
+		wg.Add(2)
+
+		// Requests to Tunnel One
+		go func(idx int) {
+			defer wg.Done()
+			path := fmt.Sprintf("/a/%d", idx)
+			resp := sendHTTPViaTunnel(t, serverAddr, "cm-one", "GET", path, "")
+			body := readBody(t, resp)
+			if !strings.Contains(body, fmt.Sprintf("echo: GET %s", path)) {
+				errors <- fmt.Sprintf("tunnel-one req %d: got %q", idx, body)
+			}
+		}(i)
+
+		// Requests to Tunnel Two
+		go func(idx int) {
+			defer wg.Done()
+			path := fmt.Sprintf("/b/%d", idx)
+			resp := sendHTTPViaTunnel(t, serverAddr, "cm-two", "GET", path, "")
+			body := readBody(t, resp)
+			if !strings.Contains(body, fmt.Sprintf("server-two: %s", path)) {
+				errors <- fmt.Sprintf("tunnel-two req %d: got %q", idx, body)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	for errMsg := range errors {
+		t.Error(errMsg)
+	}
+}

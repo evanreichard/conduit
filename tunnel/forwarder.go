@@ -21,23 +21,15 @@ type Forwarder interface {
 }
 
 func NewForwarder(target string, tunnelStore store.TunnelStore) (Forwarder, error) {
-	// Get Target URL
+	// Only parse as URL for HTTP targets. Bare host:port (e.g., "127.0.0.1:5432")
+	// is not a valid URL and should be treated as a raw TCP target.
 	targetURL, err := url.Parse(target)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get Connection Builder
-	var forwarder Forwarder
-	switch targetURL.Scheme {
-	case "http", "https":
-		forwarder, err = newHTTPForwarder(targetURL, tunnelStore)
-		if err != nil {
-			return nil, err
+	if err == nil {
+		switch targetURL.Scheme {
+		case "http", "https":
+			return newHTTPForwarder(targetURL, tunnelStore)
 		}
-	default:
-		forwarder = newTCPForwarder(target, tunnelStore)
 	}
 
-	return forwarder, nil
+	return newTCPForwarder(target, tunnelStore), nil
 }

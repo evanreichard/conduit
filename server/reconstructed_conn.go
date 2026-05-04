@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"io"
 	"net"
 )
@@ -14,17 +13,17 @@ type reconstructedConn struct {
 	reader io.Reader
 }
 
-// Read reads from the reconstructed reader (captured data + original conn).
+// Read reads from the reconstructed reader (prepended data + original conn).
 func (rc *reconstructedConn) Read(p []byte) (n int, err error) {
 	return rc.reader.Read(p)
 }
 
-// newReconstructedConn creates a reconstructed connection that replays captured data
-// before reading from the original connection.
-func newReconstructedConn(conn net.Conn, capturedData *bytes.Buffer) net.Conn {
-	allReader := io.MultiReader(capturedData, conn)
+// newReconstructedConn creates a reconstructed connection that replays the provided
+// readers in order before reading from the underlying connection.
+func newReconstructedConn(conn net.Conn, readers ...io.Reader) net.Conn {
+	allReaders := append(readers, conn)
 	return &reconstructedConn{
 		Conn:   conn,
-		reader: allReader,
+		reader: io.MultiReader(allReaders...),
 	}
 }
