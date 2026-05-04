@@ -70,11 +70,23 @@ func (s *Server) Start() error {
 	}
 	defer listener.Close()
 
+	// Context Cancellation - Close the listener when the context is cancelled
+	// so that Accept() unblocks and the loop exits cleanly.
+	go func() {
+		<-s.ctx.Done()
+		listener.Close()
+	}()
+
 	// Start Listening
 	log.Infof("conduit server listening on %s", s.cfg.BindAddress)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			// Expected Error on Shutdown
+			if s.ctx.Err() != nil {
+				log.Info("conduit server shutting down")
+				return nil
+			}
 			log.WithError(err).Error("error accepting connection")
 			continue
 		}

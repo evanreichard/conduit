@@ -42,6 +42,8 @@ func (m *Map[K, V]) HasKey(key K) bool {
 
 func (m *Map[K, V]) Entries() iter.Seq2[K, V] {
 	return func(yield func(K, V) bool) {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
 		for k, v := range m.items {
 			if !yield(k, v) {
 				return
