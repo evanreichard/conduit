@@ -31,7 +31,7 @@ tunnel/stream.go        — Stream interface (io.ReadWriteCloser + Source/Target
 server/reconstructed_conn.go — Replays re-serialized headers + buffered body + raw conn after hijack
 store/store.go          — In-memory request/response recorder with pub/sub (SSE)
 web/web.go              — Local tunnel monitor (port 8181), SSE endpoint
-config/config.go        — Reflection-based config from struct tags → flags + env vars
+config/config.go        — Reflection-based config from struct tags → flags + env vars + client config file
 pkg/maps/map.go         — Generic sync.RWMutex-guarded map
 ```
 
@@ -39,7 +39,7 @@ pkg/maps/map.go         — Generic sync.RWMutex-guarded map
 
 - **Go style**: standard `gofmt`, golangci-lint with `.golangci.toml`
 - **Comment style**: Title Case heading above logical blocks (see root `AGENTS.md`)
-- **Config**: add struct tags (`json`, `default`, `description`) to `ServerConfig` or `ClientConfig` — flags and env vars are auto-derived
+- **Config**: add struct tags (`json`, `default`, `description`) to `ServerConfig` or `ClientConfig` — flags and env vars are auto-derived. Client config may also come from `./conduit.json` or `~/.config/conduit/config.json` for `server`, `api_key`, `log_level`, and `log_format` only.
 - **Logging**: use `logrus` (`log` alias); structured fields preferred
 - **Concurrency**: use `pkg/maps.Map` for shared maps; protect other shared state with `sync.Mutex`
 - **Error handling**: return errors up; log at command/entry-point level. Use `fmt.Errorf` with `%w` for wrapping

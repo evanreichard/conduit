@@ -1,10 +1,12 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -69,7 +71,7 @@ func GetServerConfig(cmdFlags *pflag.FlagSet) (*ServerConfig, error) {
 
 	cfgValues := make(map[string]string)
 	for _, def := range defs {
-		cfgValues[def.Key] = getConfigValue(cmdFlags, def)
+		cfgValues[def.Key] = getConfigValue(cmdFlags, nil, def)
 	}
 
 	cfg := &ServerConfig{
@@ -86,9 +88,15 @@ func GetServerConfig(cmdFlags *pflag.FlagSet) (*ServerConfig, error) {
 func GetClientConfig(cmdFlags *pflag.FlagSet) (*ClientConfig, error) {
 	defs := GetConfigDefs[ClientConfig]()
 
+	// Load Client Config File
+	fileValues, err := getClientConfigFileValues()
+	if err != nil {
+		return nil, err
+	}
+
 	cfgValues := make(map[string]string)
 	for _, def := range defs {
-		cfgValues[def.Key] = getConfigValue(cmdFlags, def)
+		cfgValues[def.Key] = getConfigValue(cmdFlags, fileValues, def)
 	}
 
 	cfg := &ClientConfig{
@@ -122,7 +130,33 @@ func getBaseConfig(cfgValues map[string]string) BaseConfig {
 	}
 }
 
-func getConfigValue(cmdFlags *pflag.FlagSet, def ConfigDef) string {
+func getClientConfigFileValues() (map[string]string, error) {
+	path, err := findConfigFile()
+	if err != nil {
+		return nil, err
+	}
+	if path == "" {
+		return nil, nil
+	}
+
+	// Load Config File
+	values, err := loadConfigFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Keep Client File Settings Explicit - Tunnel name and target are intentionally
+	// not read from the config file because they should be provided per invocation.
+	clientValues := make(map[string]string)
+	for key, value := range values {
+		if isClientFileConfigKey(key) {
+			clientValues[key] = value
+		}
+	}
+	return clientValues, nil
+}
+
+func getConfigValue(cmdFlags *pflag.FlagSet, fileValues map[string]string, def ConfigDef) string {
 	// 1. Get Flags First
 	if cmdFlags != nil {
 		if val, err := cmdFlags.GetString(def.Key); err == nil && val != "" && val != def.Default {
@@ -135,8 +169,63 @@ func getConfigValue(cmdFlags *pflag.FlagSet, def ConfigDef) string {
 		return envVal
 	}
 
-	// 3. Defaults Last
+	// 3. Config File Next
+	if fileValues != nil {
+		if val := fileValues[def.Key]; val != "" {
+			return val
+		}
+	}
+
+	// 4. Defaults Last
 	return def.Default
+}
+
+func findConfigFile() (string, error) {
+	// Check Project Config
+	localPath := "conduit.json"
+	if _, err := os.Stat(localPath); err == nil {
+		return localPath, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+
+	// Check User Config
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", nil
+	}
+	userPath := filepath.Join(configDir, "conduit", "config.json")
+	if _, err := os.Stat(userPath); err == nil {
+		return userPath, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+
+	return "", nil
+}
+
+func loadConfigFile(path string) (map[string]string, error) {
+	// Read Config File
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Decode Config File
+	values := make(map[string]string)
+	if err := json.Unmarshal(data, &values); err != nil {
+		return nil, fmt.Errorf("failed to parse config file %s: %w", path, err)
+	}
+	return values, nil
+}
+
+func isClientFileConfigKey(key string) bool {
+	switch key {
+	case "server", "api_key", "log_level", "log_format":
+		return true
+	default:
+		return false
+	}
 }
 
 func processFields(t reflect.Type, defs *[]ConfigDef) {
