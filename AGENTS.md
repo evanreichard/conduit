@@ -30,7 +30,7 @@ tunnel/tcp_forwarder.go  — Direct net.Dial TCP forwarding
 tunnel/stream.go        — Stream interface (io.ReadWriteCloser + Source/Target)
 server/reconstructed_conn.go — Replays re-serialized headers + buffered body + raw conn after hijack
 store/store.go          — In-memory request/response recorder with pub/sub (SSE)
-web/web.go              — Local tunnel monitor (port 8181), SSE endpoint
+web/web.go              — Local tunnel monitor (port 8181), embedded static UI assets, SSE endpoint
 config/config.go        — Reflection-based config from struct tags → flags + env vars + client config file
 pkg/maps/map.go         — Generic sync.RWMutex-guarded map
 ```

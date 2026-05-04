@@ -16,6 +16,7 @@ import (
 const (
 	defaultQueueSize = 100
 	maxQueueSize     = 100
+	maxBodyCapture   = 1024 * 1024
 )
 
 var ErrRecordNotFound = errors.New("record not found")
@@ -98,11 +99,15 @@ func (s *tunnelStoreImpl) RecordRequest(req *http.Request, sourceAddress string)
 		SourceAddr:      sourceAddress,
 		RequestHeaders:  req.Header,
 		RequestBodyType: req.Header.Get("Content-Type"),
+		RequestBodySize: req.ContentLength,
 	}
 
-	if bodyData, err := getRequestBody(req); err == nil {
-		rec.RequestBody = bodyData
-	}
+	bodyData, meta := captureBody(&req.Body, req.Header.Get("Content-Type"), req.ContentLength, false)
+	rec.RequestBody = bodyData
+	rec.RequestBodySize = meta.size
+	rec.RequestBodyCaptured = meta.captured
+	rec.RequestBodyTruncated = meta.truncated
+	rec.RequestBodySkipped = meta.skipped
 
 	// Add Record & Truncate
 	s.orderedRecords = append(s.orderedRecords, rec)
@@ -122,10 +127,14 @@ func (s *tunnelStoreImpl) RecordResponse(resp *http.Response) error {
 	rec.Status = resp.StatusCode
 	rec.ResponseHeaders = resp.Header
 	rec.ResponseBodyType = resp.Header.Get("Content-Type")
+	rec.ResponseBodySize = resp.ContentLength
 
-	if bodyData, err := getResponseBody(resp); err == nil {
-		rec.ResponseBody = bodyData
-	}
+	bodyData, meta := captureBody(&resp.Body, resp.Header.Get("Content-Type"), resp.ContentLength, true)
+	rec.ResponseBody = bodyData
+	rec.ResponseBodySize = meta.size
+	rec.ResponseBodyCaptured = meta.captured
+	rec.ResponseBodyTruncated = meta.truncated
+	rec.ResponseBodySkipped = meta.skipped
 
 	s.broadcast(rec)
 
@@ -156,44 +165,71 @@ func (s *tunnelStoreImpl) broadcast(record *TunnelRecord) {
 	s.subs = active
 }
 
-func getRequestBody(req *http.Request) ([]byte, error) {
-	if req.ContentLength == 0 || req.Body == nil || req.Body == http.NoBody {
-		return nil, nil
-	}
-
-	if !isTextContentType(req.Header.Get("Content-Type")) {
-		return nil, nil
-	}
-
-	// Read Body
-	bodyBytes, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	// Restore Body
-	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	return bodyBytes, nil
+type bodyCaptureMeta struct {
+	size      int64
+	captured  bool
+	truncated bool
+	skipped   string
 }
 
-func getResponseBody(resp *http.Response) ([]byte, error) {
-	if resp.ContentLength == 0 || resp.Body == nil || resp.Body == http.NoBody {
-		return nil, nil
+func captureBody(body *io.ReadCloser, contentType string, contentLength int64, allowImages bool) ([]byte, bodyCaptureMeta) {
+	meta := bodyCaptureMeta{size: contentLength}
+	if contentLength == 0 || *body == nil || *body == http.NoBody {
+		return nil, meta
 	}
 
-	if !isTextContentType(resp.Header.Get("Content-Type")) {
-		return nil, nil
+	previewable := isTextContentType(contentType) || (allowImages && isImageContentType(contentType))
+	if !previewable {
+		meta.skipped = "body content type is not previewable"
+		return nil, meta
 	}
 
-	// Read Body
-	bodyBytes, err := io.ReadAll(resp.Body)
+	if isImageContentType(contentType) && contentLength > maxBodyCapture {
+		meta.skipped = "image body is too large to preview"
+		return nil, meta
+	}
+
+	// Capture Bounded Prefix
+	originalBody := *body
+	limit := int64(maxBodyCapture + 1)
+	captured, err := io.ReadAll(io.LimitReader(originalBody, limit))
 	if err != nil {
-		return nil, err
+		meta.skipped = "failed to read body"
+		*body = originalBody
+		return nil, meta
+	}
+
+	if meta.size < 0 && len(captured) <= maxBodyCapture {
+		meta.size = int64(len(captured))
 	}
 
 	// Restore Body
-	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	return bodyBytes, nil
+	*body = &replayReadCloser{
+		Reader: io.MultiReader(bytes.NewReader(captured), originalBody),
+		closer: originalBody,
+	}
+
+	if len(captured) > maxBodyCapture {
+		meta.truncated = true
+		captured = captured[:maxBodyCapture]
+	}
+
+	if isImageContentType(contentType) && meta.truncated {
+		meta.skipped = "image body is too large to preview"
+		return nil, meta
+	}
+
+	meta.captured = len(captured) > 0
+	return captured, meta
+}
+
+type replayReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (r *replayReadCloser) Close() error {
+	return r.closer.Close()
 }
 
 func isTextContentType(contentType string) bool {
@@ -206,12 +242,42 @@ func isTextContentType(contentType string) bool {
 		return true
 	}
 
+	if strings.HasSuffix(mediaType, "+json") || strings.HasSuffix(mediaType, "+xml") {
+		return true
+	}
+
 	switch mediaType {
 	case "application/json":
 		return true
 	case "application/xml":
 		return true
+	case "application/javascript":
+		return true
+	case "application/x-javascript":
+		return true
 	case "application/x-www-form-urlencoded":
+		return true
+	default:
+		return false
+	}
+}
+
+func isImageContentType(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+
+	switch mediaType {
+	case "image/png":
+		return true
+	case "image/jpeg":
+		return true
+	case "image/gif":
+		return true
+	case "image/webp":
+		return true
+	case "image/svg+xml":
 		return true
 	default:
 		return false

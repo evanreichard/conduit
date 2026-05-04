@@ -26,6 +26,7 @@ func (s *WebServer) Start(ctx context.Context) error {
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("/", s.handleRoot)
+	rootMux.HandleFunc("/assets/network.js", s.handleNetworkScript)
 	rootMux.HandleFunc("/stream", s.handleStream)
 
 	s.server = &http.Server{
@@ -85,6 +86,11 @@ func (s *WebServer) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *WebServer) handleRoot(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html")
-	_ = pages.NetworkPage().Render(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(pages.NetworkHTML()))
+}
+
+func (s *WebServer) handleNetworkScript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	_, _ = w.Write([]byte(pages.NetworkScript()))
 }

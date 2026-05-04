@@ -17,13 +17,21 @@ type TunnelRecord struct {
 	Status     int
 	SourceAddr string
 
-	RequestHeaders  http.Header
-	RequestBodyType string
-	RequestBody     []byte
+	RequestHeaders       http.Header
+	RequestBodyType      string
+	RequestBody          []byte
+	RequestBodySize      int64
+	RequestBodyCaptured  bool
+	RequestBodyTruncated bool
+	RequestBodySkipped   string
 
-	ResponseHeaders  http.Header
-	ResponseBodyType string
-	ResponseBody     []byte
+	ResponseHeaders       http.Header
+	ResponseBodyType      string
+	ResponseBody          []byte
+	ResponseBodySize      int64
+	ResponseBodyCaptured  bool
+	ResponseBodyTruncated bool
+	ResponseBodySkipped   string
 }
 
 func (tr *TunnelRecord) MarshalJSON() ([]byte, error) {
