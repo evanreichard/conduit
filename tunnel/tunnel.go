@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"sync"
 
@@ -58,14 +59,31 @@ func NewClientTunnel(cfg *config.ClientConfig, forwarder Forwarder) (*Tunnel, er
 
 	return &Tunnel{
 		name:      cfg.TunnelName,
+		publicURL: publicTunnelURL(serverURL, cfg.TunnelName),
 		wsConn:    serverConn,
 		streams:   maps.New[string, Stream](),
 		forwarder: forwarder,
 	}, nil
 }
 
+func publicTunnelURL(serverURL *url.URL, tunnelName string) string {
+	// Build Public Tunnel URL
+	host := serverURL.Hostname()
+	if host == "" {
+		host = serverURL.Host
+	}
+
+	publicHost := tunnelName + "." + host
+	if port := serverURL.Port(); port != "" {
+		publicHost = net.JoinHostPort(publicHost, port)
+	}
+
+	return (&url.URL{Scheme: serverURL.Scheme, Host: publicHost}).String()
+}
+
 type Tunnel struct {
 	name      string
+	publicURL string
 	wsConn    *websocket.Conn
 	streams   *maps.Map[string, Stream]
 	forwarder Forwarder
@@ -75,6 +93,9 @@ type Tunnel struct {
 
 func (t *Tunnel) Start(ctx context.Context) {
 	log.Infof("initiated tunnel %q with %s", t.name, t.wsConn.RemoteAddr().String())
+	if t.publicURL != "" {
+		log.Infof("tunnel available at %s", t.publicURL)
+	}
 	defer log.Infof("closed tunnel %q with %s", t.name, t.wsConn.RemoteAddr().String())
 
 	// Start Message Receiver
