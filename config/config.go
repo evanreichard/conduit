@@ -53,7 +53,7 @@ type ServerConfig struct {
 type ClientConfig struct {
 	BaseConfig
 	TunnelName   string `json:"name" description:"Tunnel name"`
-	TunnelTarget string `json:"target" description:"Tunnel target address"`
+	TunnelTarget string `json:"target" description:"Tunnel target address (tcp://, http://, or https://)"`
 }
 
 func (c *ClientConfig) Validate() error {

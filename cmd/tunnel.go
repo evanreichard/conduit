@@ -16,7 +16,7 @@ import (
 )
 
 var tunnelCmd = &cobra.Command{
-	Use:   "tunnel <name> <host:port>",
+	Use:   "tunnel --target <scheme://host:port>",
 	Short: "Create a conduit tunnel",
 	Run: func(cmd *cobra.Command, args []string) {
 		// Get Client Config

@@ -2,7 +2,9 @@ package tunnel
 
 import (
 	"context"
+	"fmt"
 	"net/url"
+	"strings"
 
 	"reichard.io/conduit/store"
 )
@@ -21,15 +23,24 @@ type Forwarder interface {
 }
 
 func NewForwarder(target string, tunnelStore store.TunnelStore) (Forwarder, error) {
-	// Only parse as URL for HTTP targets. Bare host:port (e.g., "127.0.0.1:5432")
-	// is not a valid URL and should be treated as a raw TCP target.
-	targetURL, err := url.Parse(target)
-	if err == nil {
-		switch targetURL.Scheme {
-		case "http", "https":
-			return newHTTPForwarder(targetURL, tunnelStore)
-		}
+	if !strings.Contains(target, "://") {
+		return nil, fmt.Errorf("target must include a scheme: tcp://, http://, or https://")
 	}
 
-	return newTCPForwarder(target, tunnelStore), nil
+	targetURL, err := url.Parse(target)
+	if err != nil {
+		return nil, fmt.Errorf("target is invalid: %w", err)
+	}
+	if targetURL.Host == "" {
+		return nil, fmt.Errorf("target must include a host")
+	}
+
+	switch targetURL.Scheme {
+	case "http", "https":
+		return newHTTPForwarder(targetURL, tunnelStore)
+	case "tcp":
+		return newTCPForwarder(targetURL.Host, tunnelStore), nil
+	default:
+		return nil, fmt.Errorf("unsupported target scheme %q: use tcp://, http://, or https://", targetURL.Scheme)
+	}
 }

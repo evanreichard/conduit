@@ -70,6 +70,9 @@ func (s *WebServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	ch := s.store.Subscribe()
 	done := r.Context().Done()
 
+	_, _ = fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
 	for {
 		select {
 		case record, ok := <-ch:

@@ -216,7 +216,7 @@ func sendHTTPViaTunnel(t *testing.T, serverAddr, tunnelName, method, path, body 
 	req.Host = fmt.Sprintf("%s.%s", tunnelName, serverAddr)
 
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout:   10 * time.Second,
 		Transport: &http.Transport{DisableKeepAlives: true},
 	}
 	resp, err := client.Do(req)
@@ -666,8 +666,8 @@ func TestTCPTunnelEcho(t *testing.T) {
 	serverAddr, stopServer := startConduitServer(t, apiKey)
 	defer stopServer()
 
-	// Connect TCP Tunnel (bare host:port — the realistic way users would specify it)
-	stopTunnel := connectTunnel(t, serverAddr, tcpAddr, "tcp-test", apiKey)
+	// Connect TCP Tunnel
+	stopTunnel := connectTunnel(t, serverAddr, fmt.Sprintf("tcp://%s", tcpAddr), "tcp-test", apiKey)
 	defer stopTunnel()
 
 	// Send Raw HTTP Request Through Tunnel to TCP Echo
@@ -709,8 +709,8 @@ func TestTCPTunnelLargePayload(t *testing.T) {
 	serverAddr, stopServer := startConduitServer(t, apiKey)
 	defer stopServer()
 
-	// Connect TCP Tunnel (bare host:port)
-	stopTunnel := connectTunnel(t, serverAddr, tcpAddr, "tcp-large", apiKey)
+	// Connect TCP Tunnel
+	stopTunnel := connectTunnel(t, serverAddr, fmt.Sprintf("tcp://%s", tcpAddr), "tcp-large", apiKey)
 	defer stopTunnel()
 
 	// Connect and Send Large Payload

@@ -85,10 +85,10 @@ conduit tunnel \
   --server https://conduit.example.com \
   --api_key your-secret-key \
   --name my-service \
-  --target localhost:5432
+  --target tcp://localhost:5432
 ```
 
-The local tunnel monitor is available at `http://localhost:8181` for HTTP tunnels.
+Targets must include an explicit `tcp://`, `http://`, or `https://` scheme. The local tunnel monitor is available at `http://localhost:8181` for HTTP tunnels.
 
 ## Configuration
 
@@ -111,7 +111,7 @@ All options can be set via CLI flags or environment variables (`CONDUIT_` prefix
 | `--server` | `CONDUIT_SERVER` | `http://localhost:8080` | Conduit server address |
 | `--api_key` | `CONDUIT_API_KEY` | — | API key (required) |
 | `--name` | `CONDUIT_NAME` | (auto-generated) | Tunnel subdomain name |
-| `--target` | `CONDUIT_TARGET` | — | Local target address (required) |
+| `--target` | `CONDUIT_TARGET` | — | Local target address with `tcp://`, `http://`, or `https://` scheme (required) |
 | `--log_level` | `CONDUIT_LOG_LEVEL` | `info` | Log level |
 | `--log_format` | `CONDUIT_LOG_FORMAT` | `text` | Log format (`text` or `json`) |
 
