@@ -6,8 +6,6 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    permissions:
-      packages: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,7 +29,7 @@ jobs:
         with:
           registry: gitea.va.reichard.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITEA_TOKEN }}
+          password: ${{ secrets.PACKAGE_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
